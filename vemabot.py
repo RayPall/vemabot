@@ -6,7 +6,7 @@ import requests
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────
 BASE_URL       = "https://www.vema.cz"
-START_PATH     = "/cs-cz/novinky"    # blog landing page
+START_PATH     = "/cs-cz/svet-vema"    # blog landing page
 DATE_RE        = re.compile(r"(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})")
 CUTOFF         = datetime(2024, 1, 1)   # keep articles on/after this date
 DEFAULT_HOOK   = os.getenv("MAKE_WEBHOOK_URL", "")  # set in Streamlit secrets
