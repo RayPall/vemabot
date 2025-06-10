@@ -1,4 +1,4 @@
-# app.py  –  Vema Blog scraper with summary + progress + correct pagination
+# app.py  –  Vema Blog scraper with robust summary, progress, pagination
 import os, re, requests, streamlit as st, pandas as pd
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -7,10 +7,10 @@ from typing import List, Dict
 # ───────────────────────── Configuration
 BASE_URL   = "https://www.vema.cz"
 START_PATH = "/cs-cz/svet-vema"               # landing page
-TILE_SEL   = "div.blog__item"                 # article card
+TILE_SEL   = "div.blog__item"                 # each article card
 DATE_RE    = re.compile(r"(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})")
 CUTOFF     = datetime(2024, 1, 1)             # ignore older articles
-HEADERS    = {"User-Agent": "Mozilla/5.0 VemaScraper/1.3"}
+HEADERS    = {"User-Agent": "Mozilla/5.0 VemaScraper/1.4"}
 TIMEOUT    = 20
 
 DEFAULT_HOOK = os.getenv("MAKE_WEBHOOK_URL", "")  # set in Streamlit secrets
@@ -22,10 +22,12 @@ def soup_from(url: str) -> BeautifulSoup:
 
 
 def article_summary(url: str) -> str:
-    """Download article page and return first body paragraph."""
+    """Return the first paragraph text; prefer .blog__article p."""
     try:
         s = soup_from(url)
-        p = s.select_one("article p")
+        p = s.select_one(".blog__article p")  # preferred selector
+        if not p:
+            p = s.select_one("article p")     # fallback
         return p.get_text(strip=True) if p else ""
     except Exception:
         return ""
@@ -51,7 +53,7 @@ def parse_tile(tile) -> Dict[str, str] | None:
     if pub < CUTOFF:
         return None
 
-    # image (BG style)
+    # image (background style)
     img_url = ""
     bg = tile.select_one(".blog__media-inner")
     if bg and bg.has_attr("style"):
@@ -76,7 +78,7 @@ def scrape_page(path: str) -> List[Dict[str, str]]:
 
 
 def scrape_all(status, progress) -> List[Dict[str, str]]:
-    """Scrape paginated pages; update UI status & progress."""
+    """Scrape paginated pages; update status & progress in Streamlit."""
     out, page = [], 1
     while True:
         path = START_PATH if page == 1 else f"{START_PATH}?News_page={page}"
@@ -125,6 +127,7 @@ if st.button("Send to Make") and hook:
 if st.secrets.get("viewer_api"):                      # Streamlit Cloud flag
     import streamlit.web.bootstrap as bootstrap
     from fastapi import FastAPI
+
     api = FastAPI()
 
     @api.get("/send")
