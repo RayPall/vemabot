@@ -1,4 +1,9 @@
-# app.py  –  Vema Blog scraper with robust summary, progress, pagination
+# app.py  –  Vema Blog scraper  v1.5
+# • Correct ?News_page= pagination
+# • Progress bar & status
+# • One JSON payload to Make webhook
+# • Robust summary extraction (blurb → first paragraph → meta description)
+
 import os, re, requests, streamlit as st, pandas as pd
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -7,10 +12,10 @@ from typing import List, Dict
 # ───────────────────────── Configuration
 BASE_URL   = "https://www.vema.cz"
 START_PATH = "/cs-cz/svet-vema"               # landing page
-TILE_SEL   = "div.blog__item"                 # each article card
+TILE_SEL   = "div.blog__item"                 # article card
 DATE_RE    = re.compile(r"(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})")
 CUTOFF     = datetime(2024, 1, 1)             # ignore older articles
-HEADERS    = {"User-Agent": "Mozilla/5.0 VemaScraper/1.4"}
+HEADERS    = {"User-Agent": "Mozilla/5.0 VemaScraper/1.5"}
 TIMEOUT    = 20
 
 DEFAULT_HOOK = os.getenv("MAKE_WEBHOOK_URL", "")  # set in Streamlit secrets
@@ -21,16 +26,31 @@ def soup_from(url: str) -> BeautifulSoup:
     return BeautifulSoup(html, "html.parser")
 
 
-def article_summary(url: str) -> str:
-    """Return the first paragraph text; prefer .blog__article p."""
+def article_summary(tile, url: str) -> str:
+    """Return summary in priority order:
+       1) blurb inside tile (.blog__text)
+       2) first <p> in .blog__article or <article>
+       3) meta description
+    """
+    # 1️⃣ tile-level blurb
+    blurb = tile.select_one(".blog__text")
+    if blurb and blurb.get_text(strip=True):
+        return blurb.get_text(strip=True)
+
+    # 2️⃣ fetch article page → first paragraph
     try:
         s = soup_from(url)
-        p = s.select_one(".blog__article p")  # preferred selector
-        if not p:
-            p = s.select_one("article p")     # fallback
-        return p.get_text(strip=True) if p else ""
+        p = s.select_one(".blog__article p") or s.select_one("article p")
+        if p and p.get_text(strip=True):
+            return p.get_text(strip=True)
+
+        # 3️⃣ meta description
+        meta = s.select_one('meta[name="description"]')
+        if meta and meta.get("content"):
+            return meta["content"].strip()
     except Exception:
-        return ""
+        pass
+    return ""
 
 
 def parse_tile(tile) -> Dict[str, str] | None:
@@ -41,7 +61,7 @@ def parse_tile(tile) -> Dict[str, str] | None:
     url   = BASE_URL + link_tag["href"]
     title = link_tag.get_text(strip=True)
 
-    # date
+    # date extraction
     li_date = tile.select_one(".blog__footer .blog__info ul li:nth-of-type(2)")
     if not li_date:
         return None
@@ -53,15 +73,14 @@ def parse_tile(tile) -> Dict[str, str] | None:
     if pub < CUTOFF:
         return None
 
-    # image (background style)
+    # optional background image
     img_url = ""
     bg = tile.select_one(".blog__media-inner")
     if bg and bg.has_attr("style"):
-        m_img = re.search(r"url\(([^)]+)\)", bg["style"])
-        if m_img:
+        if (m_img := re.search(r"url\(([^)]+)\)", bg["style"])):
             img_url = BASE_URL + m_img.group(1)
 
-    summary = article_summary(url)
+    summary = article_summary(tile, url)
 
     return {
         "title":   title,
@@ -78,7 +97,7 @@ def scrape_page(path: str) -> List[Dict[str, str]]:
 
 
 def scrape_all(status, progress) -> List[Dict[str, str]]:
-    """Scrape paginated pages; update status & progress in Streamlit."""
+    """Scrape paginated pages; update UI status & progress."""
     out, page = [], 1
     while True:
         path = START_PATH if page == 1 else f"{START_PATH}?News_page={page}"
@@ -97,7 +116,7 @@ def scrape_all(status, progress) -> List[Dict[str, str]]:
             status.success("✅ Reached cutoff date — done.")
             break
         page += 1
-        progress.progress(min(page / 15, 1.0))      # rough overall progress
+        progress.progress(min(page / 15, 1.0))
     status.success(f"✅ Parsed {len(out)} articles ≥ {CUTOFF:%d %b %Y}")
     progress.empty()
     return out
@@ -123,7 +142,7 @@ if st.button("Send to Make") and hook:
         except Exception as e:
             st.error(f"❌ POST failed: {e}")
 
-# ───────────────────────── Head-less endpoint /send
+# ───────────────────────── Head-less /send endpoint
 if st.secrets.get("viewer_api"):                      # Streamlit Cloud flag
     import streamlit.web.bootstrap as bootstrap
     from fastapi import FastAPI
