@@ -1,46 +1,46 @@
-# app.py  –  Vema Blog scraper v1.6
-# • Correct ?News_page= pagination
-# • Progress bar & status
-# • Sends ONE JSON payload with title, url, image, date, summary (first <p>)
-# • /send endpoint for hands-off scheduling
+# app.py  –  Vema Blog scraper v1.7  (first-paragraph summary now works)
 
 import os, re, requests, streamlit as st, pandas as pd
 from bs4 import BeautifulSoup
 from datetime import datetime
 from typing import List, Dict
 
-# ───────────────────────── Configuration
 BASE_URL   = "https://www.vema.cz"
 START_PATH = "/cs-cz/svet-vema"
 TILE_SEL   = "div.blog__item"
 DATE_RE    = re.compile(r"(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})")
 CUTOFF     = datetime(2024, 1, 1)
-HEADERS    = {"User-Agent": "Mozilla/5.0 VemaScraper/1.6"}
+HEADERS    = {"User-Agent": "Mozilla/5.0 VemaScraper/1.7"}
 TIMEOUT    = 20
 
-DEFAULT_HOOK = os.getenv("MAKE_WEBHOOK_URL", "")  # set in Streamlit secrets
+DEFAULT_HOOK = os.getenv("MAKE_WEBHOOK_URL", "")
 
-# ───────────────────────── Helpers
+# ─────────────────────── HTML helpers
 def soup_from(url: str) -> BeautifulSoup:
     html = requests.get(url, headers=HEADERS, timeout=TIMEOUT).text
     return BeautifulSoup(html, "html.parser")
 
 
 def first_paragraph(url: str) -> str:
-    """Download article page and return the first textual paragraph."""
+    """Return the very first non-empty <p> text from article page."""
     try:
         s = soup_from(url)
-        p = s.select_one(".blog__article p") or s.select_one("article p")
+        p = (
+            s.select_one(".blog__article p")            # normal case
+            or next((tag for tag in s.select("article p") if tag.get_text(strip=True)), None)
+        )
         return p.get_text(strip=True) if p else ""
     except Exception:
         return ""
 
 
+# ─────────────────────── Tile parser
 def parse_tile(tile) -> Dict[str, str] | None:
     link_tag = tile.select_one(".blog__content h3 a")
     if not link_tag or not link_tag.get("href"):
         return None
-    url   = BASE_URL + link_tag["href"]
+    href = link_tag["href"]
+    url  = href if href.startswith("http") else BASE_URL + href
     title = link_tag.get_text(strip=True)
 
     li_date = tile.select_one(".blog__footer .blog__info ul li:nth-of-type(2)")
@@ -57,8 +57,7 @@ def parse_tile(tile) -> Dict[str, str] | None:
     img_url = ""
     bg = tile.select_one(".blog__media-inner")
     if bg and bg.has_attr("style"):
-        m_img = re.search(r"url\(([^)]+)\)", bg["style"])
-        if m_img:
+        if (m_img := re.search(r"url\(([^)]+)\)", bg["style"])):
             img_url = BASE_URL + m_img.group(1)
 
     summary = first_paragraph(url)
@@ -78,7 +77,6 @@ def scrape_page(path: str) -> List[Dict[str, str]]:
 
 
 def scrape_all(status, progress) -> List[Dict[str, str]]:
-    """Scrape paginated pages; update UI progress."""
     out, page = [], 1
     while True:
         path = START_PATH if page == 1 else f"{START_PATH}?News_page={page}"
@@ -102,7 +100,8 @@ def scrape_all(status, progress) -> List[Dict[str, str]]:
     progress.empty()
     return out
 
-# ───────────────────────── Streamlit UI
+
+# ─────────────────────── Streamlit UI + webhook
 st.title("Vema blog scraper → Make webhook")
 
 hook = st.text_input("Make webhook URL", value=DEFAULT_HOOK, type="password")
@@ -123,8 +122,8 @@ if st.button("Send to Make") and hook:
         except Exception as e:
             st.error(f"❌ POST failed: {e}")
 
-# ───────────────────────── Head-less /send endpoint
-if st.secrets.get("viewer_api"):                      # Streamlit Cloud flag
+# ─────────────────────── /send endpoint for cron / Make ping
+if st.secrets.get("viewer_api"):
     import streamlit.web.bootstrap as bootstrap
     from fastapi import FastAPI
 
