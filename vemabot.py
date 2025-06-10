@@ -1,8 +1,8 @@
-# app.py  –  Vema Blog scraper  v1.5
+# app.py  –  Vema Blog scraper v1.6
 # • Correct ?News_page= pagination
 # • Progress bar & status
-# • One JSON payload to Make webhook
-# • Robust summary extraction (blurb → first paragraph → meta description)
+# • Sends ONE JSON payload with title, url, image, date, summary (first <p>)
+# • /send endpoint for hands-off scheduling
 
 import os, re, requests, streamlit as st, pandas as pd
 from bs4 import BeautifulSoup
@@ -11,11 +11,11 @@ from typing import List, Dict
 
 # ───────────────────────── Configuration
 BASE_URL   = "https://www.vema.cz"
-START_PATH = "/cs-cz/svet-vema"               # landing page
-TILE_SEL   = "div.blog__item"                 # article card
+START_PATH = "/cs-cz/svet-vema"
+TILE_SEL   = "div.blog__item"
 DATE_RE    = re.compile(r"(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})")
-CUTOFF     = datetime(2024, 1, 1)             # ignore older articles
-HEADERS    = {"User-Agent": "Mozilla/5.0 VemaScraper/1.5"}
+CUTOFF     = datetime(2024, 1, 1)
+HEADERS    = {"User-Agent": "Mozilla/5.0 VemaScraper/1.6"}
 TIMEOUT    = 20
 
 DEFAULT_HOOK = os.getenv("MAKE_WEBHOOK_URL", "")  # set in Streamlit secrets
@@ -26,42 +26,23 @@ def soup_from(url: str) -> BeautifulSoup:
     return BeautifulSoup(html, "html.parser")
 
 
-def article_summary(tile, url: str) -> str:
-    """Return summary in priority order:
-       1) blurb inside tile (.blog__text)
-       2) first <p> in .blog__article or <article>
-       3) meta description
-    """
-    # 1️⃣ tile-level blurb
-    blurb = tile.select_one(".blog__text")
-    if blurb and blurb.get_text(strip=True):
-        return blurb.get_text(strip=True)
-
-    # 2️⃣ fetch article page → first paragraph
+def first_paragraph(url: str) -> str:
+    """Download article page and return the first textual paragraph."""
     try:
         s = soup_from(url)
         p = s.select_one(".blog__article p") or s.select_one("article p")
-        if p and p.get_text(strip=True):
-            return p.get_text(strip=True)
-
-        # 3️⃣ meta description
-        meta = s.select_one('meta[name="description"]')
-        if meta and meta.get("content"):
-            return meta["content"].strip()
+        return p.get_text(strip=True) if p else ""
     except Exception:
-        pass
-    return ""
+        return ""
 
 
 def parse_tile(tile) -> Dict[str, str] | None:
-    # headline link
     link_tag = tile.select_one(".blog__content h3 a")
     if not link_tag or not link_tag.get("href"):
         return None
     url   = BASE_URL + link_tag["href"]
     title = link_tag.get_text(strip=True)
 
-    # date extraction
     li_date = tile.select_one(".blog__footer .blog__info ul li:nth-of-type(2)")
     if not li_date:
         return None
@@ -73,14 +54,14 @@ def parse_tile(tile) -> Dict[str, str] | None:
     if pub < CUTOFF:
         return None
 
-    # optional background image
     img_url = ""
     bg = tile.select_one(".blog__media-inner")
     if bg and bg.has_attr("style"):
-        if (m_img := re.search(r"url\(([^)]+)\)", bg["style"])):
+        m_img = re.search(r"url\(([^)]+)\)", bg["style"])
+        if m_img:
             img_url = BASE_URL + m_img.group(1)
 
-    summary = article_summary(tile, url)
+    summary = first_paragraph(url)
 
     return {
         "title":   title,
@@ -97,7 +78,7 @@ def scrape_page(path: str) -> List[Dict[str, str]]:
 
 
 def scrape_all(status, progress) -> List[Dict[str, str]]:
-    """Scrape paginated pages; update UI status & progress."""
+    """Scrape paginated pages; update UI progress."""
     out, page = [], 1
     while True:
         path = START_PATH if page == 1 else f"{START_PATH}?News_page={page}"
