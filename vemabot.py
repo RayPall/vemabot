@@ -1,41 +1,56 @@
-# app.py  –  Vema Blog scraper v1.7  (first-paragraph summary now works)
+# app.py  –  Vema Blog scraper  v1.8
+# • Correct ?News_page= pagination
+# • Progress bar & status
+# • Sends ONE JSON payload with title, url, image, date, summary
+# • Summary = first non-empty <p> or OG/meta description
+# • /send endpoint for hands-off scheduling
 
 import os, re, requests, streamlit as st, pandas as pd
 from bs4 import BeautifulSoup
 from datetime import datetime
 from typing import List, Dict
 
+# ───────────────────────── CONFIG
 BASE_URL   = "https://www.vema.cz"
 START_PATH = "/cs-cz/svet-vema"
 TILE_SEL   = "div.blog__item"
 DATE_RE    = re.compile(r"(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})")
 CUTOFF     = datetime(2024, 1, 1)
-HEADERS    = {"User-Agent": "Mozilla/5.0 VemaScraper/1.7"}
+HEADERS    = {"User-Agent": "Mozilla/5.0 VemaScraper/1.8"}
 TIMEOUT    = 20
-
 DEFAULT_HOOK = os.getenv("MAKE_WEBHOOK_URL", "")
 
-# ─────────────────────── HTML helpers
+# ───────────────────────── HELPERS
 def soup_from(url: str) -> BeautifulSoup:
     html = requests.get(url, headers=HEADERS, timeout=TIMEOUT).text
     return BeautifulSoup(html, "html.parser")
 
 
-def first_paragraph(url: str) -> str:
-    """Return the very first non-empty <p> text from article page."""
+def summary_from_page(url: str) -> str:
+    """Return first meaningful paragraph; else meta/OG description."""
     try:
         s = soup_from(url)
-        p = (
-            s.select_one(".blog__article p")            # normal case
-            or next((tag for tag in s.select("article p") if tag.get_text(strip=True)), None)
+
+        # 1️⃣ first non-empty <p> anywhere in article/body
+        for p in s.select("article p, main p, body p"):
+            txt = p.get_text(strip=True)
+            if txt:
+                return txt
+
+        # 2️⃣ meta description fallbacks
+        meta = (
+            s.select_one('meta[property="og:description"]')
+            or s.select_one('meta[name="description"]')
         )
-        return p.get_text(strip=True) if p else ""
+        if meta and meta.get("content"):
+            return meta["content"].strip()
     except Exception:
-        return ""
+        pass
+    return ""
 
 
-# ─────────────────────── Tile parser
 def parse_tile(tile) -> Dict[str, str] | None:
+    # headline link
     link_tag = tile.select_one(".blog__content h3 a")
     if not link_tag or not link_tag.get("href"):
         return None
@@ -43,6 +58,7 @@ def parse_tile(tile) -> Dict[str, str] | None:
     url  = href if href.startswith("http") else BASE_URL + href
     title = link_tag.get_text(strip=True)
 
+    # date
     li_date = tile.select_one(".blog__footer .blog__info ul li:nth-of-type(2)")
     if not li_date:
         return None
@@ -54,18 +70,19 @@ def parse_tile(tile) -> Dict[str, str] | None:
     if pub < CUTOFF:
         return None
 
-    img_url = ""
+    # image
+    img = ""
     bg = tile.select_one(".blog__media-inner")
     if bg and bg.has_attr("style"):
         if (m_img := re.search(r"url\(([^)]+)\)", bg["style"])):
-            img_url = BASE_URL + m_img.group(1)
+            img = BASE_URL + m_img.group(1)
 
-    summary = first_paragraph(url)
+    summary = summary_from_page(url)
 
     return {
         "title":   title,
         "url":     url,
-        "image":   img_url,
+        "image":   img,
         "date":    pub.isoformat(),
         "summary": summary
     }
@@ -100,8 +117,7 @@ def scrape_all(status, progress) -> List[Dict[str, str]]:
     progress.empty()
     return out
 
-
-# ─────────────────────── Streamlit UI + webhook
+# ───────────────────────── STREAMLIT UI
 st.title("Vema blog scraper → Make webhook")
 
 hook = st.text_input("Make webhook URL", value=DEFAULT_HOOK, type="password")
@@ -115,14 +131,14 @@ if st.button("Scrape & show"):
 
 if st.button("Send to Make") and hook:
     with st.spinner("Scraping & posting to Make…"):
-        articles = scrape_all(status_box, overall_bar)
+        arts = scrape_all(status_box, overall_bar)
         try:
-            requests.post(hook, json={"articles": articles}, timeout=30)
-            st.success(f"✅ Sent {len(articles)} articles to Make")
+            requests.post(hook, json={"articles": arts}, timeout=30)
+            st.success(f"✅ Sent {len(arts)} articles to Make")
         except Exception as e:
             st.error(f"❌ POST failed: {e}")
 
-# ─────────────────────── /send endpoint for cron / Make ping
+# ───────────────────────── /send endpoint
 if st.secrets.get("viewer_api"):
     import streamlit.web.bootstrap as bootstrap
     from fastapi import FastAPI
