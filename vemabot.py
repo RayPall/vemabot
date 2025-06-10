@@ -1,119 +1,97 @@
-# app.py
-import os
-import re
-import requests
-import streamlit as st
-import pandas as pd
+import os, re, requests, streamlit as st, pandas as pd
 from bs4 import BeautifulSoup
 from datetime import datetime
 from typing import List, Dict
 
-# ──────────────────────────── CONFIG ──────────────────────────────────────
+# ───────────────────────── Configuration
 BASE_URL   = "https://www.vema.cz"
-START_PATH = "/cs-cz/svet-vema"          # landing page with article tiles
-TILE_SEL   = "div.blog__item"            # each tile is a <div>, not <a>
+START_PATH = "/cs-cz/svet-vema"              # landing page
+TILE_SEL   = "div.blog__item"                # every tile is a <div>
 DATE_RE    = re.compile(r"(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})")
-CUTOFF     = datetime(2024, 1, 1)        # ignore articles older than this
+CUTOFF     = datetime(2024, 1, 1)
 
-DEFAULT_HOOK = os.getenv("MAKE_WEBHOOK_URL", "")  # set in Streamlit secrets
+DEFAULT_HOOK = os.getenv("MAKE_WEBHOOK_URL", "")  # set in secrets on Streamlit Cloud
+HEADERS = {"User-Agent": "Mozilla/5.0 VemaScraper/1.0"}
+TIMEOUT = 20
 
-PAGE_TIMEOUT = 20     # seconds for HTTP requests
-HEADERS = {           # polite header so the site sees a browser
-    "User-Agent": "Mozilla/5.0 (compatible; VemaScraper/1.0; +https://github.com/)"
-}
-
-# ──────────────────────── SCRAPER CORE  ───────────────────────────────────
-def fetch_page(url: str) -> BeautifulSoup:
-    html = requests.get(url, timeout=PAGE_TIMEOUT, headers=HEADERS).text
+# ───────────────────────── Scraper helpers
+def fetch(url: str) -> BeautifulSoup:
+    html = requests.get(url, headers=HEADERS, timeout=TIMEOUT).text
     return BeautifulSoup(html, "html.parser")
 
 
 def parse_tile(tile) -> Dict[str, str] | None:
-    """
-    Extract title, url, date from one <div class="blog__item">.
-    Return None if date < cutoff or pattern not found.
-    """
-    a_tag = tile.find("a", class_="blog__link")
+    """Return dict(title, url, image, date) or None if < CUTOFF."""
+    a_tag = tile.select_one(".blog__content h3 a")  # headline link
     if not a_tag or not a_tag.get("href"):
         return None
-    url = BASE_URL + a_tag["href"]
+    url   = BASE_URL + a_tag["href"]
+    title = a_tag.get_text(strip=True)
 
-    title_tag = tile.select_one(".blog__title")
-    if not title_tag:
-        return None
-    title = title_tag.get_text(strip=True)
-
-    # second <li> inside .blog__info ul holds "16. 5. 2025"
-    li_date = tile.select_one(".blog__info ul li:nth-of-type(2)")
+    # second <li> in footer -> raw date e.g. "17. 4. 2025"
+    li_date = tile.select_one(".blog__footer .blog__info ul li:nth-of-type(2)")
     if not li_date:
         return None
-
-    m = DATE_RE.search(li_date.get_text(strip=True))
+    m = DATE_RE.search(li_date.text.strip())
     if not m:
         return None
     day, month, year = map(int, m.groups())
-    pubdate = datetime(year, month, day)
-    if pubdate < CUTOFF:
+    pub = datetime(year, month, day)
+    if pub < CUTOFF:
         return None
 
-    img_tag = tile.select_one("img")
-    img_url = img_tag["src"] if img_tag and img_tag.has_attr("src") else ""
+    img_tag = tile.select_one(".blog__media-inner")
+    img_url = ""
+    if img_tag and "style" in img_tag.attrs:
+        # background-image: url(...)
+        m_img = re.search(r"url\(([^)]+)\)", img_tag["style"])
+        if m_img:
+            img_url = BASE_URL + m_img.group(1)
 
-    return {"title": title, "url": url, "image": img_url, "date": pubdate.isoformat()}
+    return {"title": title, "url": url, "image": img_url, "date": pub.isoformat()}
 
 
-def scrape_index(index_url: str) -> List[Dict[str, str]]:
-    """Scrape one page and return list of article dicts."""
-    soup = fetch_page(index_url)
-    return [a for t in soup.select(TILE_SEL) if (a := parse_tile(t))]
+def scrape_page(path: str) -> List[Dict[str, str]]:
+    soup = fetch(BASE_URL + path)
+    return [item for t in soup.select(TILE_SEL) if (item := parse_tile(t))]
 
 
 def scrape_all() -> List[Dict[str, str]]:
-    """Follow pagination (…?p=2, …) until we hit articles older than cutoff."""
-    results, page = [], 1
+    """Follow ?p=2, ?p=3… until oldest article < CUTOFF."""
+    out, p = [], 1
     while True:
-        path = f"{START_PATH}?p={page}" if page > 1 else START_PATH
-        page_url = BASE_URL + path
-        page_items = scrape_index(page_url)
-        if not page_items:
+        path = f"{START_PATH}?p={p}" if p > 1 else START_PATH
+        batch = scrape_page(path)
+        if not batch:
             break
-        results.extend(page_items)
-
-        # stop if the oldest item on this page is already before cutoff
-        oldest_on_page = min(datetime.fromisoformat(i["date"]) for i in page_items)
-        if oldest_on_page < CUTOFF:
+        out.extend(batch)
+        if min(datetime.fromisoformat(a["date"]) for a in batch) < CUTOFF:
             break
-        page += 1
-    return results
+        p += 1
+    return out
 
-
-# ───────────────────────── STREAMLIT UI  ──────────────────────────────────
-st.title("Vema Blog → Make Webhook")
+# ───────────────────────── Streamlit UI
+st.title("Vema blog scraper → Make webhook")
 
 hook = st.text_input("Make webhook URL", value=DEFAULT_HOOK, type="password")
 
 if st.button("Scrape & show"):
     articles = scrape_all()
-    df = pd.DataFrame(articles)
-    st.success(f"Found {len(df)} articles since {CUTOFF:%d %b %Y}")
-    st.dataframe(df)
+    st.success(f"Found {len(articles)} articles since {CUTOFF:%d %b %Y}")
+    st.dataframe(pd.DataFrame(articles))
 
 if st.button("Send to Make") and hook:
-    articles = scrape_all()
-    sent, failed = 0, 0
-    for art in articles:
+    sent = 0
+    for art in scrape_all():
         try:
             requests.post(hook, json=art, timeout=10)
             sent += 1
         except Exception as e:
-            st.error(f"❌  {art['title'][:40]}…  –  {e}")
-            failed += 1
-    st.success(f"✅  Sent {sent} articles   ❌  {failed} failed")
+            st.error(f"❌ {art['title'][:40]} – {e}")
+    st.success(f"✅ Sent {sent} articles to Make")
 
-
-# ────────────────────── FASTAPI ENDPOINT (/send) ──────────────────────────
-# lets Make (or a crontab) hit https://<app>.streamlit.app/send
-if st.secrets.get("viewer_api"):               # Streamlit Cloud sets this
+# ───────────────────────── head-less /send endpoint
+if st.secrets.get("viewer_api"):             # Streamlit Cloud flag
     import streamlit.web.bootstrap as bootstrap
     from fastapi import FastAPI
 
@@ -122,10 +100,9 @@ if st.secrets.get("viewer_api"):               # Streamlit Cloud sets this
     @api.get("/send")
     def send_now():
         if not hook:
-            return {"error": "No webhook configured"}
-        arts = scrape_all()
-        for art in arts:
+            return {"error": "no webhook"}
+        for art in scrape_all():
             requests.post(hook, json=art, timeout=10)
-        return {"sent": len(arts)}
+        return {"sent": len(scrape_all())}
 
     bootstrap.add_fastapi(api)
