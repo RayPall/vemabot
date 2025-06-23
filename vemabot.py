@@ -17,7 +17,7 @@ from typing import List, Dict
 
 # ───────────────────────── CONFIG ──────────────────────────
 # Choose which site you scrape ↓  (cz OR sk)
-BASE_URL   = "https://www.vema.sk
+BASE_URL   = "https://www.vema.sk"
 START_PATH = "/sk-sk/svet-vema"          # "/sk-sk/svet-vema" for Slovak site
 TILE_SEL   = "div.blog__item"
 
