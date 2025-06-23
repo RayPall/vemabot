@@ -12,7 +12,7 @@ from typing import List, Dict
 
 # ───────────────────────── CONFIG
 BASE_URL   = "https://www.vema.cz"
-START_PATH = "/cs-cz/svet-vema"
+START_PATH = "/sk-sk/svet-vema"
 TILE_SEL   = "div.blog__item"
 DATE_RE    = re.compile(r"(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})")
 CUTOFF     = datetime(2024, 1, 1)
