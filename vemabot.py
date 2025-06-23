@@ -1,10 +1,7 @@
-# app.py  –  Vema SK Blog scraper  v1.8-SK
-# • Handles "16. máj 2025" month words
-# • Correct ?News_page= pagination
-# • Progress bar & status
-# • Sends ONE JSON payload with title, url, image, date, summary
-# • Summary = first non-empty <p> or OG/meta description
-# • /send endpoint for hands-off scheduling
+# app.py  –  Vema SK blog scraper  v1.9-SK
+# • Handles numeric dates, nominative words ("máj"), genitive words ("mája")
+# • Stops only after CUTOFF (2024-01-01)
+# • Sends JSON with title, url, image, date, summary
 
 import os, re, requests, streamlit as st, pandas as pd
 from bs4 import BeautifulSoup
@@ -16,19 +13,27 @@ BASE_URL   = "https://www.vema.sk"
 START_PATH = "/sk-sk/svet-vema"
 TILE_SEL   = "div.blog__item"
 
-# Czech numeric dates  „16. 5. 2025“
+# "28. 5. 2024" or "28.5.2024"
 DATE_NUM   = re.compile(r"(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})")
 
-# Slovak worded dates „16. máj 2025“, „4. júl 2024“
-DATE_WORD  = re.compile(r"(\d{1,2})\.\s*([A-Za-záäčďéíľĺňôóŕšťúýž]+)\s*(\d{4})")
-MONTHS_SK  = {
-    "január": 1, "február": 2, "marec": 3, "apríl": 4,
-    "máj": 5, "jún": 6, "júl": 7, "august": 8,
-    "september": 9, "október": 10, "november": 11, "december": 12,
+# "16. máj 2025", "31. marca 2024", "18. apríla 2024" …
+DATE_WORD  = re.compile(r"(\d{1,2})\.\s*([A-Za-zÁÄČĎÉÍĹĽŇÓÔŔŠŤÚÝŽáäčďéíĺľňóôŕšťúýž]+)\s*(\d{4})")
+
+# map first three ASCII letters of Slovak month to number
+MONTH3 = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+    "máj": 5, "maj": 5,   # both spellings
+    "jún": 6, "jun": 6,
+    "júl": 7, "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "okt": 10,
+    "nov": 11,
+    "dec": 12,
 }
 
-CUTOFF     = datetime(2024, 1, 1)        # stop after this
-HEADERS    = {"User-Agent": "Mozilla/5.0 VemaScraper/1.8-SK"}
+CUTOFF     = datetime(2024, 1, 1)
+HEADERS    = {"User-Agent": "Mozilla/5.0 VemaScraper/1.9-SK"}
 TIMEOUT    = 20
 DEFAULT_HOOK = os.getenv("MAKE_WEBHOOK_URL", "")
 
@@ -39,17 +44,12 @@ def soup_from(url: str) -> BeautifulSoup:
 
 
 def summary_from_page(url: str) -> str:
-    """Return first meaningful paragraph; else meta/OG description."""
     try:
         s = soup_from(url)
-
-        # 1️⃣ first non-empty <p> anywhere in article/body
         for p in s.select("article p, main p, body p"):
             txt = p.get_text(strip=True)
             if txt:
                 return txt
-
-        # 2️⃣ meta description fallbacks
         meta = (
             s.select_one('meta[property="og:description"]')
             or s.select_one('meta[name="description"]')
@@ -61,8 +61,22 @@ def summary_from_page(url: str) -> str:
     return ""
 
 
+def month_from_word(word: str) -> int:
+    stem = (
+        word.lower()
+        .replace("á", "a").replace("ä", "a")
+        .replace("é", "e").replace("í", "i")
+        .replace("ó", "o").replace("ô", "o")
+        .replace("ú", "u").replace("ý", "y")
+        .replace("č", "c").replace("ď", "d")
+        .replace("ľ", "l").replace("ĺ", "l")
+        .replace("ň", "n").replace("ť", "t")
+        .replace("š", "s").replace("ž", "z")
+    )[:3]  # first three letters
+    return MONTH3.get(stem, 0)
+
+
 def parse_tile(tile) -> Dict[str, str] | None:
-    # headline link
     link_tag = tile.select_one(".blog__content h3 a")
     if not link_tag or not link_tag.get("href"):
         return None
@@ -70,11 +84,10 @@ def parse_tile(tile) -> Dict[str, str] | None:
     url  = href if href.startswith("http") else BASE_URL + href
     title = link_tag.get_text(strip=True)
 
-    # date (handles numeric or month-word)
     li_date = tile.select_one(".blog__footer .blog__info ul li:nth-of-type(2)")
     if not li_date:
         return None
-    txt = li_date.get_text(strip=True).lower()
+    txt = li_date.get_text(strip=True)
 
     m = DATE_NUM.search(txt)
     if m:
@@ -83,8 +96,8 @@ def parse_tile(tile) -> Dict[str, str] | None:
         m = DATE_WORD.search(txt)
         if not m:
             return None
-        day, month_word, year = m.groups()
-        month = MONTHS_SK.get(month_word.strip(". "), 0)
+        day, word, year = m.groups()
+        month = month_from_word(word)
         if month == 0:
             return None
         day, year = int(day), int(year)
@@ -93,7 +106,6 @@ def parse_tile(tile) -> Dict[str, str] | None:
     if pub < CUTOFF:
         return None
 
-    # image
     img = ""
     bg = tile.select_one(".blog__media-inner")
     if bg and bg.has_attr("style"):
@@ -147,35 +159,4 @@ hook = st.text_input("Make webhook URL", value=DEFAULT_HOOK, type="password")
 status_box  = st.empty()
 overall_bar = st.progress(0)
 
-if st.button("Scrape & show"):
-    with st.spinner("Initialising scraper…"):
-        data = scrape_all(status_box, overall_bar)
-    st.dataframe(pd.DataFrame(data))
-
-if st.button("Send to Make") and hook:
-    with st.spinner("Scraping & posting to Make…"):
-        arts = scrape_all(status_box, overall_bar)
-        try:
-            requests.post(hook, json={"articles": arts}, timeout=30)
-            st.success(f"✅ Sent {len(arts)} articles to Make")
-        except Exception as e:
-            st.error(f"❌ POST failed: {e}")
-
-# ───────────────────────── /send endpoint (optional cloud ping)
-if st.secrets.get("viewer_api"):
-    import streamlit.web.bootstrap as bootstrap
-    from fastapi import FastAPI
-
-    api = FastAPI()
-
-    @api.get("/send")
-    def send_now():
-        if not hook:
-            return {"error": "Webhook not configured"}
-        dummy_status, dummy_prog = st.empty(), st.progress(0)
-        arts = scrape_all(dummy_status, dummy_prog)
-        requests.post(hook, json={"articles": arts}, timeout=30)
-        dummy_status.empty(); dummy_prog.empty()
-        return {"sent": len(arts)}
-
-    bootstrap.add_fastapi(api)
+if st.button("Scrape
