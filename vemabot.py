@@ -159,4 +159,35 @@ hook = st.text_input("Make webhook URL", value=DEFAULT_HOOK, type="password")
 status_box  = st.empty()
 overall_bar = st.progress(0)
 
-if st.button("Scrape
+if st.button("Scrape & show"):
+    with st.spinner("Initialising scraper…"):
+        data = scrape_all(status_box, overall_bar)
+    st.dataframe(pd.DataFrame(data))
+
+if st.button("Send to Make") and hook:
+    with st.spinner("Scraping & posting to Make…"):
+        arts = scrape_all(status_box, overall_bar)
+        try:
+            requests.post(hook, json={"articles": arts}, timeout=30)
+            st.success(f"✅ Sent {len(arts)} articles to Make")
+        except Exception as e:
+            st.error(f"❌ POST failed: {e}")
+
+# ───────────────────────── /send endpoint
+if st.secrets.get("viewer_api"):
+    import streamlit.web.bootstrap as bootstrap
+    from fastapi import FastAPI
+
+    api = FastAPI()
+
+    @api.get("/send")
+    def send_now():
+        if not hook:
+            return {"error": "Webhook not configured"}
+        dummy_status, dummy_prog = st.empty(), st.progress(0)
+        arts = scrape_all(dummy_status, dummy_prog)
+        requests.post(hook, json={"articles": arts}, timeout=30)
+        dummy_status.empty(); dummy_prog.empty()
+        return {"sent": len(arts)}
+
+    bootstrap.add_fastapi(api)
