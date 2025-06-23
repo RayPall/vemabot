@@ -1,4 +1,5 @@
-# app.py  –  Vema Blog scraper  v1.8
+# app.py  –  Vema SK Blog scraper  v1.8-SK
+# • Handles "16. máj 2025" month words
 # • Correct ?News_page= pagination
 # • Progress bar & status
 # • Sends ONE JSON payload with title, url, image, date, summary
@@ -14,9 +15,20 @@ from typing import List, Dict
 BASE_URL   = "https://www.vema.sk"
 START_PATH = "/sk-sk/svet-vema"
 TILE_SEL   = "div.blog__item"
-DATE_RE    = re.compile(r"(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})")
-CUTOFF     = datetime(2024, 1, 1)
-HEADERS    = {"User-Agent": "Mozilla/5.0 VemaScraper/1.8"}
+
+# Czech numeric dates  „16. 5. 2025“
+DATE_NUM   = re.compile(r"(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})")
+
+# Slovak worded dates „16. máj 2025“, „4. júl 2024“
+DATE_WORD  = re.compile(r"(\d{1,2})\.\s*([A-Za-záäčďéíľĺňôóŕšťúýž]+)\s*(\d{4})")
+MONTHS_SK  = {
+    "január": 1, "február": 2, "marec": 3, "apríl": 4,
+    "máj": 5, "jún": 6, "júl": 7, "august": 8,
+    "september": 9, "október": 10, "november": 11, "december": 12,
+}
+
+CUTOFF     = datetime(2024, 1, 1)        # stop after this
+HEADERS    = {"User-Agent": "Mozilla/5.0 VemaScraper/1.8-SK"}
 TIMEOUT    = 20
 DEFAULT_HOOK = os.getenv("MAKE_WEBHOOK_URL", "")
 
@@ -58,14 +70,25 @@ def parse_tile(tile) -> Dict[str, str] | None:
     url  = href if href.startswith("http") else BASE_URL + href
     title = link_tag.get_text(strip=True)
 
-    # date
+    # date (handles numeric or month-word)
     li_date = tile.select_one(".blog__footer .blog__info ul li:nth-of-type(2)")
     if not li_date:
         return None
-    m = DATE_RE.search(li_date.get_text(strip=True))
-    if not m:
-        return None
-    day, month, year = map(int, m.groups())
+    txt = li_date.get_text(strip=True).lower()
+
+    m = DATE_NUM.search(txt)
+    if m:
+        day, month, year = map(int, m.groups())
+    else:
+        m = DATE_WORD.search(txt)
+        if not m:
+            return None
+        day, month_word, year = m.groups()
+        month = MONTHS_SK.get(month_word.strip(". "), 0)
+        if month == 0:
+            return None
+        day, year = int(day), int(year)
+
     pub = datetime(year, month, day)
     if pub < CUTOFF:
         return None
@@ -118,7 +141,7 @@ def scrape_all(status, progress) -> List[Dict[str, str]]:
     return out
 
 # ───────────────────────── STREAMLIT UI
-st.title("Vema blog scraper → Make webhook")
+st.title("Vema SK blog scraper → Make webhook")
 
 hook = st.text_input("Make webhook URL", value=DEFAULT_HOOK, type="password")
 status_box  = st.empty()
@@ -138,7 +161,7 @@ if st.button("Send to Make") and hook:
         except Exception as e:
             st.error(f"❌ POST failed: {e}")
 
-# ───────────────────────── /send endpoint
+# ───────────────────────── /send endpoint (optional cloud ping)
 if st.secrets.get("viewer_api"):
     import streamlit.web.bootstrap as bootstrap
     from fastapi import FastAPI
